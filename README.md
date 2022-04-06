@@ -26,8 +26,11 @@
 ## Install dependencies
 
 ```bash
-cd strips-test
-npm install
+╭─root at localhost in ⌁
+╰─λ cd strips-test/                                                                                                                                                                                                                                                                     0 (0.001s) < 23:26:48
+
+╭─root at localhost in ⌁/strips-test (master ✔)
+╰─λ npm install
 ```
 
 ## Run tests
