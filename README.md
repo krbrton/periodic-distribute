@@ -35,6 +35,7 @@
 
 ## Run tests
 ```bash
+╭─root at localhost in ⌁/strips-test (master ✔)
 ╰─λ npx hardhat test                                                                                                                                                                                                                                                                    0 (2.092s) < 23:25:55
 
 
