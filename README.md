@@ -32,5 +32,14 @@ npm install
 
 ## Run tests
 ```bash
+╰─λ npx hardhat test                                                                                                                                                                                                                                                                    0 (2.092s) < 23:25:55
 
+
+  RewardVault
+    ✔ constructor (83ms)
+    ✔ period change (127ms)
+    ✔ trader reward (228ms)
+
+
+  3 passing (1s)
 ```
