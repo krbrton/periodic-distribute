@@ -1,4 +1,4 @@
-import {Contract, BigNumber} from "ethers";
+import {Contract} from "ethers";
 import {expect} from "chai";
 import {ethers} from "hardhat";
 import {parseUnits, formatUnits} from "ethers/lib/utils";
@@ -9,7 +9,7 @@ let rewardToken: Contract;
 
 describe('RewardVault', () => {
     beforeEach(async () => {
-        rewardToken = await tokenFixture("STRIPS", "Strips Reward Token", 6);
+        rewardToken = await tokenFixture("STRIPS", "Strips Reward Token", 18);
     });
 
     it('constructor', async () => {
@@ -19,116 +19,84 @@ describe('RewardVault', () => {
         expect(await rewardVault.token()).to.eq(rewardToken.address);
     });
 
-    it('period volumes', async () => {
-        const [_, trader1, trader2, trader3] = await ethers.getSigners();
+    it('period change', async () => {
+        const [_, trader] = await ethers.getSigners();
         const rewardVault = await rewardVaultFixture(rewardToken.address);
-        await rewardToken.transferOwnership(rewardVault.address);
-        const periodId = await rewardVault.periodId();
 
-        await rewardVault.connect(trader1).openLongPosition(parseUnits("100000", 18));
-        await rewardVault.connect(trader2).openShortPosition(parseUnits("50000", 18));
-        await rewardVault.connect(trader3).openLongPosition(parseUnits("100000", 18));
-        await rewardVault.connect(trader2).openLongPosition(parseUnits("25000", 18));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(1));
 
-        const period = await rewardVault.periods(periodId);
-        const trader2Volume = await rewardVault.traderVolume(trader2.address, periodId);
+        await rewardVault.onTrade(trader.address, parseUnits("10000"));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(1));
 
-        expect(period.volume.eq(parseUnits("275000", 18))).to.true;
-        expect(trader2Volume.eq(parseUnits("75000", 18))).to.true;
+        await rewardVault.onTrade(trader.address, parseUnits("10000"));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(1));
+
+        await hre.network.provider.request({method: "evm_increaseTime", params: [3600 * 24 * 30]});
+        await hre.network.provider.request({method: "evm_mine", params: []});
+
+        await rewardVault.onTrade(trader.address, parseUnits("10000"));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(2));
+
+        await rewardVault.onTrade(trader.address, parseUnits("10000"));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(2));
+
+        await hre.network.provider.request({method: "evm_increaseTime", params: [3600 * 24 * 30]});
+        await hre.network.provider.request({method: "evm_mine", params: []});
+
+        await rewardVault.onTrade(trader.address, parseUnits("10000"));
+        expect(await rewardVault.periodId()).to.eq(ethers.BigNumber.from(3));
     });
 
-    it('period bounds', async () => {
+    it('trader reward', async () => {
         const [_, trader1, trader2, trader3, trader4] = await ethers.getSigners();
         const rewardVault = await rewardVaultFixture(rewardToken.address);
-        await rewardToken.transferOwnership(rewardVault.address);
-        const periodId = await rewardVault.periodId();
-        const periodTimestamp = (await rewardVault.periods(periodId)).timestamp;
+        await rewardToken.transferOwnership(rewardVault.address); // For minting by vault in claimReward method
 
-        await rewardVault.connect(trader1).openLongPosition(parseUnits("100000", 18));
-        await rewardVault.connect(trader1).openShortPosition(parseUnits("50000", 18));
-        await hre.network.provider.request({method: "evm_increaseTime", params: [2592000]});
-        await hre.network.provider.request({method: "evm_mine", params: []});
-        await expect(rewardVault.connect(trader1).openLongPosition(parseUnits("10000", 18)))
-            .to.be.revertedWith("WRONG_TIMESTAMP: period already ended");
+        // period 1
+        await rewardVault.onTrade(trader1.address, parseUnits("100000"));
+        await rewardVault.onTrade(trader2.address, parseUnits("50000"));
+        await rewardVault.onTrade(trader3.address, parseUnits("100000"));
+        await rewardVault.onTrade(trader2.address, parseUnits("25000"));
 
-        // add new period
-        await rewardVault.addPeriod(periodTimestamp.add(2592000), 2592000, 3870);
-        expect(periodId.add(1)).to.eq(await rewardVault.periodId());
-
-        await rewardVault.connect(trader4).openShortPosition(parseUnits("100000", 18));
-    })
-
-    it('period pending claim', async () => {
-        const [_, trader1, trader2, trader3, trader4] = await ethers.getSigners();
-        const rewardVault = await rewardVaultFixture(rewardToken.address);
-        await rewardToken.transferOwnership(rewardVault.address);
-        const periodId = await rewardVault.periodId();
-        let periodTimestamp = (await rewardVault.periods(periodId)).timestamp;
-
-        await rewardVault.connect(trader1).openLongPosition(100000);
-        await rewardVault.connect(trader2).openShortPosition(50000);
-        await rewardVault.connect(trader3).openLongPosition(100000);
-        await rewardVault.connect(trader2).openLongPosition(25000);
-
-        // add new period
-        periodTimestamp = periodTimestamp.add(2592000);
-        await rewardVault.addPeriod(periodTimestamp, 2592000, 3870);
-        await hre.network.provider.request({method: "evm_increaseTime", params: [2592000]});
+        await hre.network.provider.request({method: "evm_increaseTime", params: [3600 * 24 * 30]});
         await hre.network.provider.request({method: "evm_mine", params: []});
 
-        await rewardVault.connect(trader4).openShortPosition(100000);
-        await rewardVault.connect(trader2).openLongPosition(25000);
+        // period 2
+        await rewardVault.onTrade(trader4.address, parseUnits("100000"));
+        await rewardVault.onTrade(trader2.address, parseUnits("25000"));
 
-        // add new period
-        periodTimestamp = periodTimestamp.add(2592000);
-        await rewardVault.addPeriod(periodTimestamp, 2592000, 3870);
-        await hre.network.provider.request({method: "evm_increaseTime", params: [2592000]});
+        await hre.network.provider.request({method: "evm_increaseTime", params: [3600 * 24 * 30]});
         await hre.network.provider.request({method: "evm_mine", params: []});
 
-        await rewardVault.connect(trader1).openShortPosition(100000);
+        // period 3-4
+        await rewardVault.onTrade(trader1.address, parseUnits("100000"));
 
-        // add new period
-        periodTimestamp = periodTimestamp.add(2592000);
-        await rewardVault.addPeriod(periodTimestamp, 2592000, 3870);
-        await hre.network.provider.request({method: "evm_increaseTime", params: [2592000]});
+        await hre.network.provider.request({method: "evm_increaseTime", params: [2 * 3600 * 24 * 30]});
         await hre.network.provider.request({method: "evm_mine", params: []});
 
-        // check pending rewards
-        const trader1Pending = await rewardVault.pendingAll(trader1.address);
-        const trader2Pending = await rewardVault.pendingAll(trader2.address);
-        const trader3Pending = await rewardVault.pendingAll(trader3.address);
-        const trader4Pending = await rewardVault.pendingAll(trader4.address);
+        // period 5
+        const pendingReward1 = await rewardVault.pendingReward(trader1.address);
+        const pendingReward2 = await rewardVault.pendingReward(trader2.address);
+        const pendingReward3 = await rewardVault.pendingReward(trader3.address);
+        const pendingReward4 = await rewardVault.pendingReward(trader4.address);
 
-        expect(trader1Pending.eq(582610)).to.true;
-        expect(trader2Pending.eq(229913)).to.true;
-        expect(trader3Pending.eq(195610)).to.true;
-        expect(trader4Pending.eq(332820)).to.true;
+        await rewardVault.connect(trader1).claimReward();
+        await rewardVault.connect(trader2).claimReward();
+        await rewardVault.connect(trader3).claimReward();
+        await rewardVault.connect(trader4).claimReward();
 
-        // claim rewards
-        await rewardVault.connect(trader1).claimAll();
-        await rewardVault.connect(trader2).claimAll();
-        await rewardVault.connect(trader3).claimAll();
-        await rewardVault.connect(trader4).claimAll();
-
-        // check pending rewards after claim
-        const trader1PendingAfter = await rewardVault.pendingAll(trader1.address);
-        const trader2PendingAfter = await rewardVault.pendingAll(trader2.address);
-        const trader3PendingAfter = await rewardVault.pendingAll(trader3.address);
-        const trader4PendingAfter = await rewardVault.pendingAll(trader4.address);
-
-        expect(trader1PendingAfter.eq("0")).to.true;
-        expect(trader2PendingAfter.eq("0")).to.true;
-        expect(trader3PendingAfter.eq("0")).to.true;
-        expect(trader4PendingAfter.eq("0")).to.true;
-
+        // some checks
         const trader1Balance = await rewardToken.balanceOf(trader1.address);
         const trader2Balance = await rewardToken.balanceOf(trader2.address);
         const trader3Balance = await rewardToken.balanceOf(trader3.address);
         const trader4Balance = await rewardToken.balanceOf(trader4.address);
 
-        expect(trader1Balance.eq(trader1Pending)).to.true;
-        expect(trader2Balance.eq(trader2Pending)).to.true;
-        expect(trader3Balance.eq(trader3Pending)).to.true;
-        expect(trader4Balance.eq(trader4Pending)).to.true;
+        expect(pendingReward1).to.eq(trader1Balance);
+        expect(pendingReward2).to.eq(trader2Balance);
+        expect(pendingReward3).to.eq(trader3Balance);
+        expect(pendingReward4).to.eq(trader4Balance);
+
+        expect(trader4Balance.lt(trader3Balance)).to.true;
+        expect(trader2Balance.lt(trader1Balance)).to.true;
     });
 });

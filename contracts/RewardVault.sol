@@ -3,138 +3,113 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "./interfaces/IERC20Minter.sol";
-import "hardhat/console.sol";
+import "./interfaces/IERC20.sol";
 
 contract RewardVault is Initializable, OwnableUpgradeable {
-    event Claimed(address trader, uint256 amount);
+    struct PeriodInfo {
+        uint256 timestamp;   // Period start timestamp
+        uint256 duration;    // Period duration
+        uint256 volume;      // Cumulative market volume for period
+        uint256 accPerShare; // Seconds accumulator per market volume
+    }
 
     struct TraderInfo {
-        uint256 volume;
-        uint256 long;
-        uint256 short;
-        uint256 claimed;
-        uint256 lastAccPerShare;
+        uint256 lastPeriodId;    // Period id from last trade of trader
+        uint256 lastAccPerShare; // Last accumulated seconds of period reward was paid
+        // TODO: create mapping PeriodTraderInfo and move trader's volume to save history of every trader in every period
+        uint256 volume;          // Current period trader's volume
+        uint256 debt;            // Debt from previous periods
+        uint256 debtPaid;        // Paid debt from previous periods
     }
 
-    struct PeriodInfo {
-        uint256 timestamp;
-        uint256 duration;
-        uint256 coefficient;
-        uint256 volume;
-        uint256 accPerShare;
-        mapping(address => TraderInfo) traders;
-    }
+    event Reward(address trader, uint256 notional, uint256 reward);
+    event PeriodChanged(uint256 id, uint256 timestamp, uint256 duration);
 
-    // NOTE: this is constant only because this task is test, in production more general interface is required
-    uint256 public constant periodCoefficient = 3870; // used to setup reward rate per second, in base points
-    uint256 public constant periodDuration = 2592000; // current period
+    uint256 constant periodDuration = 3600 * 24 * 30;
+    uint256 constant rewardPerSecond = 3870;
+    uint256 constant precision = 1e36;
 
-    address public token;                               // ERC20 token address to pay rewards in
-    uint256 public periodId;                            // Current period id
-    mapping(uint256 => PeriodInfo) public periods;      // periods history with all related info
-    mapping(address => uint256) public traderLastClaim; // Last period trader claimed his reward
+    address public token;
+    mapping(address => TraderInfo) public traders;
+    uint256 public periodId;
+    mapping(uint256 => PeriodInfo) private periods;
+    uint256 lastTradeTimestamp;
 
-    function initialize(address _token) public initializer {
+    function initialize(address _token) public initializer syncPeriod {
         __Ownable_init();
 
         token = _token;
-
-        addPeriod(block.timestamp, periodDuration, periodCoefficient);
     }
 
-    modifier checkPeriod() {
-        require(periods[periodId].timestamp <= block.timestamp, "WRONG_TIMESTAMP: period not started");
-        require(block.timestamp < periods[periodId].timestamp + periods[periodId].duration, "WRONG_TIMESTAMP: period already ended");
+    modifier syncPeriod() {
+        PeriodInfo storage period = periods[periodId];
+        uint256 periodEnd = period.timestamp + period.duration;
+        uint256 newPeriodEnd = periodEnd + periodDuration;
+
+        if (block.timestamp > periodEnd) {
+            // If there was no trades more than `periodDuration` since last period end then extend duration
+            if (block.timestamp > newPeriodEnd) {
+                newPeriodEnd = block.timestamp;
+            }
+
+            uint256 _periodDuration;
+
+            if (periodEnd == 0) {
+                periodEnd = block.timestamp;
+                _periodDuration = periodDuration;
+            } else {
+                _periodDuration = newPeriodEnd - periodEnd;
+            }
+
+            periodId += 1;
+            periods[periodId] = PeriodInfo(periodEnd, _periodDuration, 0, 0);
+            lastTradeTimestamp = block.timestamp;
+
+            emit PeriodChanged(periodId, periodEnd, _periodDuration);
+        }
+
         _;
     }
 
-    function addPeriod(uint256 _timestamp, uint256 _duration, uint256 _coefficient) public onlyOwner {
-//        require(_timestamp + _duration < block.timestamp, "WRONG_TIMESTAMP: already ended");
+    function onTrade(address _trader, int256 _notional) public onlyOwner syncPeriod {
+        PeriodInfo storage period = periods[periodId];
+        TraderInfo storage trader = traders[_trader];
+        uint256 notional = uint256(_notional >= 0 ? _notional : -_notional);
+        uint256 rewardSeconds = block.timestamp - lastTradeTimestamp;
 
-        if (periodId > 0) {
-            uint256 lastPeriodEndTimestamp = periods[periodId].timestamp + periods[periodId].duration;
-
-            require(lastPeriodEndTimestamp <= _timestamp, "WRONG_TIMESTAMP: overlap with previous period");
+        // If trader's period is changed increase his debt and change his periodId
+        if (trader.lastPeriodId != periodId) {
+            trader.debt += pendingReward(_trader);
+            trader.lastPeriodId = periodId;
+            trader.volume = 0;
         }
 
-        periodId += 1;
-        periods[periodId].timestamp = _timestamp;
-        periods[periodId].duration = _duration;
-        periods[periodId].coefficient = _coefficient;
+        trader.volume += notional;
+        period.volume += notional;
+        period.accPerShare += rewardPerSecond * rewardSeconds * precision / period.volume / 1e4;
+        lastTradeTimestamp = block.timestamp;
     }
 
-    function openLongPosition(uint256 amount) public checkPeriod {
-        periods[periodId].volume += amount;
-        periods[periodId].traders[msg.sender].volume += amount;
-        periods[periodId].traders[msg.sender].long += amount;
+    function pendingReward(address _trader) public view returns (uint256) {
+        TraderInfo storage trader = traders[_trader];
+        PeriodInfo storage period = periods[trader.lastPeriodId];
+        uint256 newAccPerShare = period.accPerShare - trader.lastAccPerShare;
+        uint8 tokenDecimals = IERC20(token).decimals();
+        uint256 currentPending = newAccPerShare * trader.volume * (1 << tokenDecimals) / precision;
+        uint256 debtPending = trader.debt - trader.debtPaid;
 
-        distribute(periodId, amount);
+        return currentPending + debtPending;
     }
 
-    function openShortPosition(uint256 amount) public checkPeriod {
-        periods[periodId].volume += amount;
-        periods[periodId].traders[msg.sender].volume += amount;
-        periods[periodId].traders[msg.sender].short += amount;
+    function claimReward() public syncPeriod {
+        TraderInfo storage trader = traders[_msgSender()];
+        PeriodInfo storage period = periods[trader.lastPeriodId];
 
-        distribute(periodId, amount);
-    }
+        require(trader.volume > 0, "INVALID_TRADER");
+        uint256 pending = pendingReward(_msgSender());
+        IERC20(token).mint(_msgSender(), pending);
 
-    function periodTimePassed(uint256 _periodId) public view returns (uint256) {
-        uint256 duration = block.timestamp - periods[_periodId].timestamp;
-
-        if (duration > periods[_periodId].duration) {
-            return periods[_periodId].duration;
-        }
-
-        return duration;
-    }
-
-    function distribute(uint256 _periodId, uint256 amount) private {
-        periods[_periodId].accPerShare += amount * periodTimePassed(_periodId) * periodCoefficient * 1e36 / periods[_periodId].volume / 1e4;
-    }
-
-    function pending(address _trader, uint256 _periodId) public view returns (uint256) {
-        uint256 newAccPerShare = periods[_periodId].accPerShare - periods[_periodId].traders[_trader].lastAccPerShare;
-
-        return newAccPerShare * periods[_periodId].traders[_trader].volume / 1e36;
-    }
-
-    function pendingAll(address _trader) public view returns (uint256) {
-        uint256 total = 0;
-
-        // NOTE: actually this is not good, BUT if period's duration is big enough(1 month is enough) - this cycle
-        // should have small amount of iterations. Example: only 12 iterations per year because default period
-        // size is 1 month.
-        for (uint i = traderLastClaim[_trader]; i <= periodId; i++) {
-            total += pending(_trader, i);
-        }
-
-        return total;
-    }
-
-    function claim(uint256 _periodId) public {
-        uint pendingReward = pending(msg.sender, _periodId);
-        periods[_periodId].traders[msg.sender].claimed += pendingReward;
-        IERC20Minter(token).mint(msg.sender, pendingReward);
-        periods[_periodId].traders[msg.sender].lastAccPerShare = periods[_periodId].accPerShare;
-
-        emit Claimed(msg.sender, pendingReward);
-    }
-
-    function claimAll() public {
-        for (uint i = traderLastClaim[msg.sender]; i <= periodId; i++) {
-            claim(i);
-        }
-
-        traderLastClaim[msg.sender] = periodId;
-    }
-
-    function traderClaimed(address _trader, uint256 _periodId) public view returns (uint256) {
-        return periods[_periodId].traders[_trader].claimed;
-    }
-
-    function traderVolume(address _trader, uint256 _periodId) public view returns (uint256) {
-        return periods[_periodId].traders[_trader].volume;
+        trader.lastAccPerShare = period.accPerShare;
+        trader.debtPaid = trader.debt;
     }
 }
