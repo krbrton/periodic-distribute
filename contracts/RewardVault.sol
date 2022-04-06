@@ -86,7 +86,7 @@ contract RewardVault is Initializable, OwnableUpgradeable {
 
         trader.volume += notional;
         period.volume += notional;
-        period.accPerShare += rewardPerSecond * rewardSeconds * precision / period.volume / 1e4;
+        period.accPerShare += rewardSeconds * precision / period.volume;
         lastTradeTimestamp = block.timestamp;
     }
 
@@ -95,7 +95,7 @@ contract RewardVault is Initializable, OwnableUpgradeable {
         PeriodInfo storage period = periods[trader.lastPeriodId];
         uint256 newAccPerShare = period.accPerShare - trader.lastAccPerShare;
         uint8 tokenDecimals = IERC20(token).decimals();
-        uint256 currentPending = newAccPerShare * trader.volume * (1 << tokenDecimals) / precision;
+        uint256 currentPending = newAccPerShare * rewardPerSecond * trader.volume * (1 << tokenDecimals) / precision / 1e4;
         uint256 debtPending = trader.debt - trader.debtPaid;
 
         return currentPending + debtPending;

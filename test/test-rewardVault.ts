@@ -52,6 +52,12 @@ describe('RewardVault', () => {
         const rewardVault = await rewardVaultFixture(rewardToken.address);
         await rewardToken.transferOwnership(rewardVault.address); // For minting by vault in claimReward method
 
+        // volumes by traders:
+        // trader1 = 100000 + 100000       = 200 000
+        // trader2 = 50000 + 25000 + 25000 = 100 000
+        // trader3 = 100000                = 100 000
+        // trader4 = 100000                = 100 000
+
         // period 1
         await rewardVault.onTrade(trader1.address, parseUnits("100000"));
         await rewardVault.onTrade(trader2.address, parseUnits("50000"));
@@ -98,5 +104,7 @@ describe('RewardVault', () => {
 
         expect(trader4Balance.lt(trader3Balance)).to.true;
         expect(trader2Balance.lt(trader1Balance)).to.true;
+        expect(trader3Balance.eq(trader1Balance)).to.true;
+        expect(trader4Balance.lt(trader1Balance)).to.true;
     });
 });
